@@ -12,17 +12,19 @@ from datetime import datetime, timedelta
 import sys
 import os
 
-# Add parent directory to path for imports
-# Since this file is in: streamlit_app/pages/
-# We need to go up 2 levels to reach streamlit_app/
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# Add the streamlit_app directory to the path
+# This file is at: streamlit_app/pages/01_📥_data_collection.py
+# We need to add: streamlit_app/ directory to sys.path
+streamlit_app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if streamlit_app_dir not in sys.path:
+    sys.path.insert(0, streamlit_app_dir)
 
-# Now we can import from streamlit_app level
-import streamlit_app.config as config
-from streamlit_app.src.data_fetcher import DataFetcher
-from streamlit_app.src.data_processor import DataProcessor
-from streamlit_app.src.cache_manager import CacheManager
-from streamlit_app.src.utils import DataFormatter, MetricsFormatter, ExportHelper
+# Now import directly (not as streamlit_app.module)
+import config
+from src.data_fetcher import DataFetcher
+from src.data_processor import DataProcessor
+from src.cache_manager import CacheManager
+from src.utils import DataFormatter, MetricsFormatter, ExportHelper
 
 # ==================== PAGE CONFIGURATION ====================
 st.set_page_config(
