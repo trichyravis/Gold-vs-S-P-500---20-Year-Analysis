@@ -153,6 +153,13 @@ if fetch_button or refresh_button:
                     st.session_state.data = processed_data
                     st.session_state.validation_results = validation_results
                     
+                    # Save to cache
+                    try:
+                        cache_mgr = CacheManager(cache_dir='data/cache', cache_duration_hours=24)
+                        cache_mgr.save_cache(raw_data)
+                    except Exception as e:
+                        print(f"Warning: Could not save to cache: {str(e)}")
+                    
                     # Show success message
                     st.success(f"✅ Data fetched and validated successfully! Quality Score: {quality_score:.1f}%")
                     st.rerun()
@@ -163,14 +170,16 @@ if fetch_button or refresh_button:
 # ==================== CLEAR CACHE ====================
 if clear_button:
     try:
-        cache_manager = CacheManager()
-        cache_manager.clear_cache()
-        st.session_state.data = None
-        st.session_state.raw_data = None
-        st.session_state.validation_results = None
-        st.session_state.fetch_errors = []
-        st.success("✅ Cache cleared successfully")
-        st.rerun()
+        cache_mgr = CacheManager(cache_dir='data/cache', cache_duration_hours=24)
+        if cache_mgr.clear_cache():
+            st.session_state.data = None
+            st.session_state.raw_data = None
+            st.session_state.validation_results = None
+            st.session_state.fetch_errors = []
+            st.success("✅ Cache cleared successfully")
+            st.rerun()
+        else:
+            st.warning("⚠️ Cache was already empty")
     except Exception as e:
         st.error(f"❌ Error clearing cache: {str(e)}")
 
