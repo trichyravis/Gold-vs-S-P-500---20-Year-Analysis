@@ -11,7 +11,7 @@ import numpy as np
 from datetime import datetime, timedelta
 import streamlit as st
 import time
-from typing import Tuple, Dict, Optional, List
+from typing import Tuple, Dict, Optional, List, Union
 
 
 class DataFetcher:
@@ -20,16 +20,23 @@ class DataFetcher:
     with robust rate limit handling and error recovery
     """
     
-    def __init__(self, tickers: List[str], start_date: Optional[str] = None, end_date: Optional[str] = None):
+    def __init__(self, tickers: Union[Dict, List], start_date: Optional[str] = None, end_date: Optional[str] = None):
         """
         Initialize DataFetcher
         
         Args:
-            tickers: List of ticker symbols (e.g., ['GLD', 'SPY'])
+            tickers: Can be dict {'gold': 'GLD', 'sp500': 'SPY'} or list ['GLD', 'SPY']
             start_date: Start date as string (YYYY-MM-DD), optional
             end_date: End date as string (YYYY-MM-DD), optional
         """
-        self.tickers = tickers
+        # Handle both dict and list formats
+        if isinstance(tickers, dict):
+            self.tickers = list(tickers.values())  # Extract ticker symbols
+            self.ticker_names = tickers  # Keep mapping for reference
+        else:
+            self.tickers = tickers if isinstance(tickers, list) else [tickers]
+            self.ticker_names = {ticker.lower(): ticker for ticker in self.tickers}
+        
         self.start_date = start_date
         self.end_date = end_date
         self.cache = {}
@@ -47,7 +54,7 @@ class DataFetcher:
         raw_data = {}
         failed_tickers = []
         
-        st.info(f"Starting data fetch for {len(self.tickers)} tickers...")
+        st.info(f"Starting data fetch for {len(self.tickers)} tickers: {', '.join(self.tickers)}...")
         print(f"Starting data fetch for {len(self.tickers)} tickers: {self.tickers}")
         
         # Process each ticker
@@ -129,7 +136,7 @@ class DataFetcher:
                     print(f"  Date range: {self.start_date} to {self.end_date}")
                 else:
                     kwargs['period'] = '1y'
-                    print(f"  Using period: 1y")
+                    print(f"  Using period: 1 year")
                 
                 # Download data
                 print(f"  Downloading {ticker} from Yahoo Finance...")
