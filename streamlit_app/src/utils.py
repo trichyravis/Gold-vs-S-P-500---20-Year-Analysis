@@ -14,6 +14,12 @@ try:
 except ImportError:
     HAS_OPENPYXL = False
 
+try:
+    from openpyxl.styles import Font, PatternFill, Alignment
+    HAS_STYLES = True
+except ImportError:
+    HAS_STYLES = False
+
 
 class DataFormatter:
     """Formatting utilities for data display"""
@@ -50,9 +56,21 @@ class DataFormatter:
             return str(date)
 
     @staticmethod
-    def format_returns(returns: pd.Series, decimals: int = 2) -> pd.Series:
-        """Format returns series"""
-        return returns.apply(lambda x: f"{x:.{decimals}f}%" if pd.notna(x) else "N/A")
+    def format_returns(returns: pd.Series, decimals: int = 4) -> pd.Series:
+        """Format returns series - handles both Series and DataFrame"""
+        try:
+            # If it's a DataFrame, apply to each column
+            if isinstance(returns, pd.DataFrame):
+                return returns.applymap(lambda x: f"{x:.{decimals}f}%" if pd.notna(x) else "N/A")
+            
+            # If it's a Series, apply element-wise
+            if isinstance(returns, pd.Series):
+                return returns.apply(lambda x: f"{x:.{decimals}f}%" if (pd.notna(x) and isinstance(x, (int, float))) else "N/A")
+            
+            return returns
+        except Exception as e:
+            print(f"Error formatting returns: {str(e)}")
+            return returns
 
 
 class MetricsFormatter:
@@ -62,15 +80,15 @@ class MetricsFormatter:
     def get_quality_level(score: float) -> Tuple[str, str]:
         """Get quality level description and emoji"""
         if pd.isna(score):
-            return "Unknown", "?"
+            return "Unknown", "❓"
         if score >= 90:
-            return "Excellent", "G"
+            return "Excellent", "🟢"
         elif score >= 75:
-            return "Good", "Y"
+            return "Good", "🟡"
         elif score >= 60:
-            return "Fair", "O"
+            return "Fair", "🟠"
         else:
-            return "Poor", "R"
+            return "Poor", "🔴"
 
     @staticmethod
     def format_metric(value: Any, metric_type: str = "number") -> str:
@@ -86,7 +104,7 @@ class MetricsFormatter:
 
     @staticmethod
     def calculate_volatility(returns: pd.Series) -> float:
-        """Calculate volatility"""
+        """Calculate volatility (annualized)"""
         if returns is None or returns.empty:
             return 0.0
         return float(returns.std() * np.sqrt(252) * 100)
@@ -115,52 +133,6 @@ class MetricsFormatter:
         running_max = cum_returns.expanding().max()
         drawdown = (cum_returns - running_max) / running_max
         return float(drawdown.min() * 100)
-
-
-class ExportHelper:
-    """Export utilities"""
-
-    @staticmethod
-    def dataframe_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Data") -> bytes:
-        """Convert DataFrame to Excel bytes"""
-        if not HAS_OPENPYXL:
-            raise ImportError("openpyxl required for Excel export")
-        
-        output = BytesIO()
-        try:
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
-            output.seek(0)
-            return output.getvalue()
-        except Exception as e:
-            raise Exception(f"Error creating Excel: {str(e)}")
-
-    @staticmethod
-    def dataframe_to_json(df: pd.DataFrame) -> str:
-        """Convert DataFrame to JSON"""
-        try:
-            return df.to_json(orient='records', date_format='iso')
-        except Exception as e:
-            raise Exception(f"Error converting to JSON: {str(e)}")
-
-    @staticmethod
-    def dataframe_to_csv(df: pd.DataFrame) -> str:
-        """Convert DataFrame to CSV"""
-        try:
-            return df.to_csv(index=False)
-        except Exception as e:
-            raise Exception(f"Error converting to CSV: {str(e)}")
-
-    @staticmethod
-    def export_summary(data: Dict[str, Any], format_type: str = "json") -> str:
-        """Export summary data"""
-        try:
-            if format_type == "json":
-                return json.dumps(data, indent=2, default=str)
-            else:
-                return str(data)
-        except Exception as e:
-            raise Exception(f"Error exporting: {str(e)}")
 
 
 class DataValidator:
@@ -202,12 +174,59 @@ class DataValidator:
         return True, "Price data valid"
 
 
+class ExportHelper:
+    """Export utilities"""
+
+    @staticmethod
+    def dataframe_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Data") -> bytes:
+        """Convert DataFrame to Excel bytes"""
+        if not HAS_OPENPYXL:
+            raise ImportError("openpyxl is required for Excel export. Install with: pip install openpyxl")
+        
+        output = BytesIO()
+        try:
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
+            
+            output.seek(0)
+            return output.getvalue()
+        except Exception as e:
+            raise Exception(f"Error creating Excel file: {str(e)}")
+
+    @staticmethod
+    def dataframe_to_json(df: pd.DataFrame) -> str:
+        """Convert DataFrame to JSON"""
+        try:
+            return df.to_json(orient='records', date_format='iso')
+        except Exception as e:
+            raise Exception(f"Error converting to JSON: {str(e)}")
+
+    @staticmethod
+    def dataframe_to_csv(df: pd.DataFrame) -> str:
+        """Convert DataFrame to CSV"""
+        try:
+            return df.to_csv(index=False)
+        except Exception as e:
+            raise Exception(f"Error converting to CSV: {str(e)}")
+
+    @staticmethod
+    def export_summary(data: Dict[str, Any], format_type: str = "json") -> str:
+        """Export summary data"""
+        try:
+            if format_type == "json":
+                return json.dumps(data, indent=2, default=str)
+            else:
+                return str(data)
+        except Exception as e:
+            raise Exception(f"Error exporting summary: {str(e)}")
+
+
 class StatisticalHelper:
     """Statistical calculation utilities"""
 
     @staticmethod
     def calculate_correlation(series1: pd.Series, series2: pd.Series) -> float:
-        """Calculate correlation"""
+        """Calculate correlation between two series"""
         try:
             return float(series1.corr(series2))
         except:
@@ -241,6 +260,7 @@ class CacheHelper:
         """Check if cache should be refreshed"""
         if last_update is None:
             return True
+        
         age = (datetime.now() - last_update).total_seconds() / 3600
         return age > max_age_hours
 
@@ -249,7 +269,9 @@ class CacheHelper:
         """Format cache age as string"""
         if last_update is None:
             return "Never"
+        
         age = (datetime.now() - last_update).total_seconds()
+        
         if age < 60:
             return f"{int(age)} seconds ago"
         elif age < 3600:
@@ -258,3 +280,37 @@ class CacheHelper:
             return f"{int(age / 3600)} hours ago"
         else:
             return f"{int(age / 86400)} days ago"
+
+
+class PerformanceAnalyzer:
+    """Performance analysis utilities"""
+
+    @staticmethod
+    def calculate_returns(prices: pd.Series) -> pd.Series:
+        """Calculate daily returns from prices"""
+        try:
+            return prices.pct_change() * 100
+        except Exception as e:
+            raise Exception(f"Error calculating returns: {str(e)}")
+
+    @staticmethod
+    def calculate_cumulative_returns(prices: pd.Series) -> pd.Series:
+        """Calculate cumulative returns from prices"""
+        try:
+            return (prices / prices.iloc[0] - 1) * 100
+        except Exception as e:
+            raise Exception(f"Error calculating cumulative returns: {str(e)}")
+
+    @staticmethod
+    def compare_performance(asset1_returns: pd.Series, asset2_returns: pd.Series) -> Dict[str, float]:
+        """Compare performance of two assets"""
+        try:
+            return {
+                'asset1_total_return': MetricsFormatter.calculate_cumulative_return(asset1_returns),
+                'asset2_total_return': MetricsFormatter.calculate_cumulative_return(asset2_returns),
+                'asset1_volatility': MetricsFormatter.calculate_volatility(asset1_returns),
+                'asset2_volatility': MetricsFormatter.calculate_volatility(asset2_returns),
+                'correlation': StatisticalHelper.calculate_correlation(asset1_returns, asset2_returns),
+            }
+        except Exception as e:
+            raise Exception(f"Error comparing performance: {str(e)}")
