@@ -1,301 +1,260 @@
+
 """
-Data Processor Module - Validation, cleaning, and quality assessment
+Data processor module for processing financial data
 Author: Prof. V. Ravichandran
 """
 
 import pandas as pd
 import numpy as np
-from datetime import datetime
-from typing import Dict, Tuple, List
-import json
+from typing import Tuple, Dict, Any, Optional
 import logging
 
 logger = logging.getLogger(__name__)
 
+
 class DataProcessor:
     """Process and validate financial data"""
-    
-    def __init__(self, validation_rules: Dict):
+
+    def __init__(self, validation_rules: Optional[Dict] = None):
         """
         Initialize DataProcessor
         
         Args:
-            validation_rules: Dictionary of validation parameters
+            validation_rules: Dictionary of validation rules
         """
-        self.validation_rules = validation_rules
-        self.quality_checks = []
-        self.data = None
-        
-    def process_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        self.validation_rules = validation_rules or {}
+
+    def process_data(self, raw_data: Dict) -> pd.DataFrame:
         """
-        Main processing pipeline
+        Process raw data from Yahoo Finance
         
         Args:
-            df: Raw DataFrame from fetcher
+            raw_data: Dictionary with ticker as key, DataFrame as value
+                     Each DataFrame has DatetimeIndex and Close column
             
         Returns:
-            Processed DataFrame
+            Processed DataFrame with combined data
         """
-        # Make a copy to avoid modifying original
-        processed = df.copy()
-        
-        # Ensure date column is datetime
-        processed['date'] = pd.to_datetime(processed['date'])
-        
-        # Sort by date
-        processed = processed.sort_values('date').reset_index(drop=True)
-        
-        # Handle missing values (forward fill)
-        processed = self._handle_missing_values(processed)
-        
-        # Ensure numeric types
-        processed['gold'] = pd.to_numeric(processed['gold'], errors='coerce')
-        processed['sp500'] = pd.to_numeric(processed['sp500'], errors='coerce')
-        
-        # Calculate daily returns
-        processed['gold_return'] = processed['gold'].pct_change() * 100
-        processed['sp500_return'] = processed['sp500'].pct_change() * 100
-        
-        # Calculate cumulative returns
-        processed['gold_cumulative'] = (1 + processed['gold_return'] / 100).cumprod() - 1
-        processed['sp500_cumulative'] = (1 + processed['sp500_return'] / 100).cumprod() - 1
-        
-        self.data = processed
-        return processed
-    
-    def _handle_missing_values(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Handle missing values with forward fill"""
-        # Forward fill for price columns
-        df['gold'] = df['gold'].fillna(method='ffill').fillna(method='bfill')
-        df['sp500'] = df['sp500'].fillna(method='ffill').fillna(method='bfill')
-        
-        return df
-    
+        try:
+            if not raw_data:
+                return pd.DataFrame()
+            
+            # Start with an empty DataFrame
+            processed = None
+            
+            # Process each ticker
+            for ticker, df in raw_data.items():
+                if df is None or df.empty:
+                    logger.warning(f"Skipping empty data for {ticker}")
+                    continue
+                
+                # Get the Close column
+                if 'Close' in df.columns:
+                    # Extract Close prices and rename to ticker
+                    ticker_data = df[['Close']].copy()
+                    ticker_data.columns = [ticker]
+                else:
+                    # If no Close column, use first column
+                    ticker_data = df.iloc[:, [0]].copy()
+                    ticker_data.columns = [ticker]
+                
+                # Join with existing data
+                if processed is None:
+                    processed = ticker_data
+                else:
+                    processed = processed.join(ticker_data, how='outer')
+            
+            # If no data was processed, return empty DataFrame
+            if processed is None or processed.empty:
+                logger.error("No valid data after processing")
+                return pd.DataFrame()
+            
+            # Reset index to make date a column
+            processed = processed.reset_index()
+            processed.columns = ['Date'] + list(processed.columns[1:])
+            
+            # Ensure Date column is datetime
+            processed['Date'] = pd.to_datetime(processed['Date'])
+            
+            # Forward fill any missing values
+            processed = processed.fillna(method='ffill')
+            
+            # Drop remaining NaN rows
+            processed = processed.dropna()
+            
+            logger.info(f"Successfully processed data: {len(processed)} rows, {processed.shape[1]} columns")
+            
+            return processed
+            
+        except Exception as e:
+            logger.error(f"Error processing data: {str(e)}")
+            return pd.DataFrame()
+
     def validate_data(self, df: pd.DataFrame) -> Tuple[bool, Dict, float]:
         """
-        Perform comprehensive data validation
+        Validate processed data
         
         Args:
             df: DataFrame to validate
             
         Returns:
-            Tuple of (is_valid, results_dict, quality_score)
+            Tuple of (is_valid, validation_results, quality_score)
         """
-        results = {
-            'passed': [],
-            'failed': [],
-            'warnings': [],
-            'details': {}
-        }
-        
-        # Check 1: No negative prices
-        check_name = "No negative prices"
-        if (df['gold'] < 0).any() or (df['sp500'] < 0).any():
-            results['failed'].append(check_name)
-        else:
-            results['passed'].append(check_name)
-        
-        # Check 2: No future dates
-        check_name = "No future dates"
-        future_dates = df['date'] > datetime.today()
-        if future_dates.any():
-            results['failed'].append(check_name)
-            results['details'][check_name] = f"Found {future_dates.sum()} future dates"
-        else:
-            results['passed'].append(check_name)
-        
-        # Check 3: Reasonable daily changes
-        check_name = "Reasonable daily price changes (max 10%)"
-        gold_changes = df['gold'].pct_change().abs() * 100
-        sp500_changes = df['sp500'].pct_change().abs() * 100
-        
-        max_change = self.validation_rules.get('max_daily_change_pct', 10.0)
-        gold_outliers = (gold_changes > max_change).sum()
-        sp500_outliers = (sp500_changes > max_change).sum()
-        
-        if gold_outliers > 0 or sp500_outliers > 0:
-            results['warnings'].append(check_name)
-            results['details'][check_name] = f"Gold: {gold_outliers}, S&P500: {sp500_outliers} changes > {max_change}%"
-        else:
-            results['passed'].append(check_name)
-        
-        # Check 4: Date continuity
-        check_name = "Complete date range (no gaps > 2 business days)"
-        date_diffs = df['date'].diff().dt.days
-        max_gap = self.validation_rules.get('max_gap_business_days', 2)
-        gaps = (date_diffs > max_gap).sum()
-        
-        if gaps > 0:
-            results['warnings'].append(check_name)
-            results['details'][check_name] = f"Found {gaps} gaps > {max_gap} days (expected on weekends/holidays)"
-        else:
-            results['passed'].append(check_name)
-        
-        # Check 5: Same number of records
-        check_name = "Same number of records for both assets"
-        gold_count = df['gold'].notna().sum()
-        sp500_count = df['sp500'].notna().sum()
-        
-        if gold_count != sp500_count:
-            results['failed'].append(check_name)
-            results['details'][check_name] = f"Gold: {gold_count}, S&P500: {sp500_count}"
-        else:
-            results['passed'].append(check_name)
-        
-        # Check 6: No duplicate dates
-        check_name = "No duplicate dates"
-        duplicates = df['date'].duplicated().sum()
-        
-        if duplicates > 0:
-            results['failed'].append(check_name)
-            results['details'][check_name] = f"Found {duplicates} duplicate dates"
-        else:
-            results['passed'].append(check_name)
-        
-        # Check 7: Numeric prices
-        check_name = "Prices are numeric"
-        gold_numeric = pd.to_numeric(df['gold'], errors='coerce').notna().sum() == len(df)
-        sp500_numeric = pd.to_numeric(df['sp500'], errors='coerce').notna().sum() == len(df)
-        
-        if not (gold_numeric and sp500_numeric):
-            results['failed'].append(check_name)
-        else:
-            results['passed'].append(check_name)
-        
-        # Check 8: Consistent date format
-        check_name = "Date format is consistent"
         try:
-            all_dates = pd.to_datetime(df['date'])
-            results['passed'].append(check_name)
-        except:
-            results['failed'].append(check_name)
-        
-        # Check 9: No NULL values
-        check_name = "No NULL values (or properly handled)"
-        gold_nulls = df['gold'].isna().sum()
-        sp500_nulls = df['sp500'].isna().sum()
-        
-        if gold_nulls > 0 or sp500_nulls > 0:
-            results['warnings'].append(check_name)
-            results['details'][check_name] = f"Gold NULLs: {gold_nulls}, S&P500 NULLs: {sp500_nulls} (forward-filled)"
-        else:
-            results['passed'].append(check_name)
-        
-        # Check 10: Expected trading days
-        check_name = "Data matches expected trading days"
-        expected_trading_days = len(df)
-        actual_trading_days = (df['date'].max() - df['date'].min()).days
-        
-        # Trading days should be roughly 252 per year
-        expected_per_year = 252
-        years = (df['date'].max() - df['date'].min()).days / 365.25
-        expected_total = int(expected_per_year * years)
-        
-        trading_ratio = expected_trading_days / expected_total if expected_total > 0 else 0
-        
-        if trading_ratio < 0.95:  # Allow 5% variance
-            results['warnings'].append(check_name)
-            results['details'][check_name] = f"Expected ~{expected_total}, got {expected_trading_days} (ratio: {trading_ratio:.1%})"
-        else:
-            results['passed'].append(check_name)
-        
-        # Calculate quality score
-        total_checks = len(results['passed']) + len(results['failed'])
-        passed_checks = len(results['passed'])
-        
-        # Failures count more than warnings
-        failure_penalty = len(results['failed']) * 10
-        warning_penalty = len(results['warnings']) * 2
-        
-        quality_score = max(0, 100 - failure_penalty - warning_penalty)
-        quality_score = min(100, quality_score)
-        
-        # Determine if data is valid (at least 8/10 checks passed)
-        is_valid = len(results['failed']) == 0
-        
-        results['summary'] = {
-            'total_checks': total_checks,
-            'passed': len(results['passed']),
-            'failed': len(results['failed']),
-            'warnings': len(results['warnings']),
-            'quality_score': round(quality_score, 1)
-        }
-        
-        return is_valid, results, quality_score
-    
+            passed = []
+            failed = []
+            warnings = []
+            
+            if df.empty:
+                return False, {
+                    'passed': [], 
+                    'failed': ['Data is empty'], 
+                    'warnings': [], 
+                    'summary': {'quality_score': 0, 'completeness': 0}
+                }, 0.0
+            
+            # Check data has required columns
+            required_cols = ['Date']
+            for col in required_cols:
+                if col in df.columns:
+                    passed.append(f"Column '{col}' present")
+                else:
+                    failed.append(f"Column '{col}' missing")
+            
+            # Check for ticker data columns
+            ticker_cols = [col for col in df.columns if col != 'Date']
+            if len(ticker_cols) >= 2:
+                passed.append(f"Both asset columns present ({', '.join(ticker_cols)})")
+            else:
+                failed.append(f"Missing asset data columns (found {len(ticker_cols)})")
+            
+            # Check data completeness
+            completeness = 1 - (df.isnull().sum().sum() / (df.shape[0] * df.shape[1]))
+            if completeness >= 0.95:
+                passed.append("Data completeness >= 95%")
+            elif completeness >= 0.80:
+                warnings.append(f"Data completeness is {completeness*100:.1f}% (target: 95%)")
+            else:
+                failed.append(f"Data completeness < 80% ({completeness*100:.1f}%)")
+            
+            # Check for minimum rows
+            if len(df) >= 250:
+                passed.append(f"Sufficient data rows ({len(df)})")
+            else:
+                failed.append(f"Insufficient data rows ({len(df)}, need at least 250)")
+            
+            # Check date range
+            if 'Date' in df.columns and len(df) > 0:
+                date_range_days = (df['Date'].max() - df['Date'].min()).days
+                if date_range_days >= 365 * 15:  # At least 15 years
+                    passed.append(f"Date range sufficient ({date_range_days} days)")
+                else:
+                    warnings.append(f"Date range is {date_range_days} days (target: 20 years)")
+            
+            # Check for duplicate dates
+            if 'Date' in df.columns:
+                duplicates = df['Date'].duplicated().sum()
+                if duplicates == 0:
+                    passed.append("No duplicate dates")
+                else:
+                    failed.append(f"Found {duplicates} duplicate dates")
+            
+            # Check for positive prices in ticker columns
+            ticker_cols = [col for col in df.columns if col != 'Date']
+            for col in ticker_cols:
+                if col in df.columns:
+                    positive_check = (df[col] > 0).all()
+                    if positive_check:
+                        passed.append(f"{col} prices are all positive")
+                    else:
+                        failed.append(f"{col} contains non-positive prices")
+            
+            # Calculate quality score
+            total_checks = len(passed) + len(failed)
+            quality_score = (len(passed) / total_checks * 100) if total_checks > 0 else 50
+            
+            results = {
+                'passed': passed,
+                'failed': failed,
+                'warnings': warnings,
+                'summary': {
+                    'quality_score': round(quality_score, 2),
+                    'completeness': round(completeness * 100, 2),
+                    'total_rows': len(df),
+                    'total_columns': df.shape[1],
+                    'checks_passed': len(passed),
+                    'checks_failed': len(failed)
+                }
+            }
+            
+            is_valid = len(failed) == 0
+            return is_valid, results, quality_score
+            
+        except Exception as e:
+            logger.error(f"Error validating data: {str(e)}")
+            return False, {
+                'passed': [], 
+                'failed': [str(e)], 
+                'warnings': [], 
+                'summary': {'quality_score': 0, 'completeness': 0}
+            }, 0.0
+
     def calculate_quality_metrics(self, df: pd.DataFrame) -> Dict:
         """
-        Calculate detailed quality metrics
+        Calculate data quality metrics
         
         Args:
-            df: Processed DataFrame
+            df: DataFrame to analyze
             
         Returns:
-            Dictionary of quality metrics
+            Dictionary with quality metrics
         """
-        metrics = {
-            'data_completeness': {
-                'gold': {
-                    'total_rows': len(df),
-                    'non_null': df['gold'].notna().sum(),
-                    'null_count': df['gold'].isna().sum(),
-                    'completeness_pct': (df['gold'].notna().sum() / len(df) * 100) if len(df) > 0 else 0
-                },
-                'sp500': {
-                    'total_rows': len(df),
-                    'non_null': df['sp500'].notna().sum(),
-                    'null_count': df['sp500'].isna().sum(),
-                    'completeness_pct': (df['sp500'].notna().sum() / len(df) * 100) if len(df) > 0 else 0
+        try:
+            metrics = {
+                'data_completeness': {},
+                'date_range': {},
+                'statistics': {}
+            }
+            
+            # Get non-Date columns (ticker columns)
+            ticker_cols = [col for col in df.columns if col != 'Date']
+            
+            # Data completeness for each ticker
+            for col in ticker_cols:
+                if col in df.columns:
+                    valid_rows = df[col].notna().sum()
+                    metrics['data_completeness'][col] = {
+                        'total_rows': len(df),
+                        'valid_rows': valid_rows,
+                        'completeness_pct': round((valid_rows / len(df) * 100) if len(df) > 0 else 0, 2)
+                    }
+            
+            # Date range
+            if 'Date' in df.columns and len(df) > 0:
+                metrics['date_range'] = {
+                    'start_date': str(df['Date'].iloc[0].date()),
+                    'end_date': str(df['Date'].iloc[-1].date()),
+                    'total_days': (df['Date'].iloc[-1] - df['Date'].iloc[0]).days,
+                    'trading_days': len(df)
                 }
-            },
-            'duplicate_check': {
-                'duplicate_dates': df['date'].duplicated().sum(),
-                'unique_dates': df['date'].nunique(),
-                'is_duplicate_free': df['date'].duplicated().sum() == 0
-            },
-            'outlier_check': {
-                'gold_max_daily_change': df['gold'].pct_change().abs().max() * 100,
-                'sp500_max_daily_change': df['sp500'].pct_change().abs().max() * 100,
-            },
-            'date_range': {
-                'start_date': df['date'].min().strftime('%Y-%m-%d') if len(df) > 0 else None,
-                'end_date': df['date'].max().strftime('%Y-%m-%d') if len(df) > 0 else None,
-                'total_days': (df['date'].max() - df['date'].min()).days if len(df) > 0 else 0,
-                'trading_days': len(df)
-            }
-        }
-        
-        return metrics
-    
-    def get_summary_stats(self, df: pd.DataFrame) -> Dict:
-        """
-        Get summary statistics for display
-        
-        Args:
-            df: Processed DataFrame
             
-        Returns:
-            Dictionary of summary statistics
-        """
-        stats = {
-            'gold': {
-                'mean': df['gold'].mean(),
-                'median': df['gold'].median(),
-                'std': df['gold'].std(),
-                'min': df['gold'].min(),
-                'max': df['gold'].max(),
-                'latest': df['gold'].iloc[-1] if len(df) > 0 else None,
-                'change_pct': ((df['gold'].iloc[-1] - df['gold'].iloc[0]) / df['gold'].iloc[0] * 100) if len(df) > 0 else 0
-            },
-            'sp500': {
-                'mean': df['sp500'].mean(),
-                'median': df['sp500'].median(),
-                'std': df['sp500'].std(),
-                'min': df['sp500'].min(),
-                'max': df['sp500'].max(),
-                'latest': df['sp500'].iloc[-1] if len(df) > 0 else None,
-                'change_pct': ((df['sp500'].iloc[-1] - df['sp500'].iloc[0]) / df['sp500'].iloc[0] * 100) if len(df) > 0 else 0
+            # Basic statistics for each ticker
+            for col in ticker_cols:
+                if col in df.columns:
+                    metrics['statistics'][col] = {
+                        'mean_price': round(df[col].mean(), 2),
+                        'median_price': round(df[col].median(), 2),
+                        'min_price': round(df[col].min(), 2),
+                        'max_price': round(df[col].max(), 2),
+                        'std_dev': round(df[col].std(), 2)
+                    }
+            
+            return metrics
+            
+        except Exception as e:
+            logger.error(f"Error calculating metrics: {str(e)}")
+            return {
+                'data_completeness': {},
+                'date_range': {},
+                'statistics': {}
             }
-        }
-        
-        return stats
