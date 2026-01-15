@@ -1,185 +1,247 @@
+
 """
-Data Fetcher Module - Yahoo Finance API Wrapper
-Fetches historical price data for Gold (GLD) and S&P 500 (SPY)
+Data Fetcher Module
+Handles fetching real-time stock data from Yahoo Finance with robust error handling
 Author: Prof. V. Ravichandran
 """
 
 import yfinance as yf
 import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta
-import logging
-from typing import Dict, Tuple, Optional
-import warnings
+import streamlit as st
+import time
+from typing import Tuple, Dict, Optional, List
 
-# Suppress yfinance warnings
-warnings.filterwarnings('ignore')
-logging.basicConfig(level=logging.WARNING)
 
 class DataFetcher:
-    """Fetch historical financial data from Yahoo Finance"""
+    """
+    Fetches real-time financial data for Gold (GLD) and S&P 500 (SPY) from Yahoo Finance
+    with robust rate limit handling and error recovery
+    """
     
-    def __init__(self, tickers: Dict[str, str], start_date: str, end_date: str = None):
+    def __init__(self, tickers: List[str], start_date: Optional[str] = None, end_date: Optional[str] = None):
         """
         Initialize DataFetcher
         
         Args:
-            tickers: Dict of {name: ticker_symbol}
-            start_date: Start date (YYYY-MM-DD)
-            end_date: End date (YYYY-MM-DD), defaults to today
+            tickers: List of ticker symbols (e.g., ['GLD', 'SPY'])
+            start_date: Start date as string (YYYY-MM-DD), optional
+            end_date: End date as string (YYYY-MM-DD), optional
         """
         self.tickers = tickers
         self.start_date = start_date
-        self.end_date = end_date or datetime.today().strftime('%Y-%m-%d')
-        self.data = {}
+        self.end_date = end_date
+        self.cache = {}
+        self.data = None
         self.errors = []
-        
-    def fetch_single_ticker(self, ticker_symbol: str, ticker_name: str) -> Optional[pd.DataFrame]:
+
+    def fetch_all(self) -> Tuple[Optional[Dict], List]:
         """
-        Fetch data for a single ticker
+        Fetches data with detailed error tracking, rate limit handling, and progress logging.
+        Uses exponential backoff for rate limiting.
+        
+        Returns:
+            Tuple of (raw_data dict, failed_tickers list)
+        """
+        raw_data = {}
+        failed_tickers = []
+        
+        st.info(f"Starting data fetch for {len(self.tickers)} tickers...")
+        print(f"Starting data fetch for {len(self.tickers)} tickers: {self.tickers}")
+        
+        # Process each ticker
+        for idx, ticker in enumerate(self.tickers):
+            try:
+                print(f"Attempting to fetch: {ticker} ({idx+1}/{len(self.tickers)})")
+                st.write(f"📥 Fetching {ticker}... ({idx+1}/{len(self.tickers)})")
+                
+                # Fetch data with retry logic
+                df = self._fetch_with_retry(ticker)
+                
+                if df is not None and not df.empty:
+                    raw_data[ticker] = df
+                    print(f"Successfully fetched {ticker}: {len(df)} rows found.")
+                    st.success(f"✅ {ticker}: {len(df)} rows fetched")
+                else:
+                    error_msg = f"{ticker} (No data found)"
+                    print(f"Validation Check: {ticker} returned an empty DataFrame.")
+                    failed_tickers.append(error_msg)
+                    st.warning(f"⚠️ {error_msg}")
+                
+            except Exception as e:
+                error_msg = f"Failed to fetch {ticker}: {str(e)}"
+                print(f"ERROR: {error_msg}")
+                st.error(f"❌ {error_msg}")
+                failed_tickers.append(error_msg)
+        
+        # Check if any data was fetched
+        if not raw_data:
+            error_msg = "Critical Failure: No data was retrieved for any tickers."
+            print(f"ERROR: {error_msg}")
+            st.error(f"❌ {error_msg}")
+            self.data = None
+            self.errors = failed_tickers
+            return None, failed_tickers
+        
+        # Log partial success if some tickers failed
+        if failed_tickers:
+            warning_msg = f"Partial success. Issues with: {', '.join(failed_tickers)}"
+            print(f"WARNING: {warning_msg}")
+            st.warning(warning_msg)
+        else:
+            success_msg = f"Success! Fetched data for all {len(raw_data)} tickers."
+            print(f"INFO: {success_msg}")
+            st.success(f"✅ {success_msg}")
+        
+        self.data = raw_data
+        self.errors = failed_tickers
+        return raw_data, failed_tickers
+
+    def _fetch_with_retry(self, ticker: str, max_retries: int = 3) -> Optional[pd.DataFrame]:
+        """
+        Fetch data for a single ticker with exponential backoff retry logic
         
         Args:
-            ticker_symbol: Ticker symbol (e.g., 'GLD')
-            ticker_name: Friendly name (e.g., 'Gold')
+            ticker: Ticker symbol (e.g., 'GLD', 'SPY')
+            max_retries: Maximum number of retries
             
         Returns:
-            DataFrame or None if error
+            DataFrame or None if fetch fails
         """
-        try:
-            print(f"📥 Fetching {ticker_name} ({ticker_symbol})...")
-            
-            # Download data from Yahoo Finance
-            data = yf.download(
-                ticker_symbol,
-                start=self.start_date,
-                end=self.end_date,
-                progress=False,
-                interval='1d'
-            )
-            
-            if data.empty:
-                self.errors.append(f"No data found for {ticker_name} ({ticker_symbol})")
-                return None
-            
-            # Reset index to make Date a column
-            data.reset_index(inplace=True)
-            
-            # Rename columns for consistency
-            data.columns = [col.lower() for col in data.columns]
-            
-            # Keep only relevant columns
-            data = data[['date', 'close']].copy()
-            data.columns = ['date', ticker_name.lower()]
-            
-            # Ensure date is datetime
-            data['date'] = pd.to_datetime(data['date'])
-            
-            # Sort by date
-            data = data.sort_values('date').reset_index(drop=True)
-            
-            print(f"✅ Successfully fetched {len(data)} rows for {ticker_name}")
-            return data
-            
-        except Exception as e:
-            error_msg = f"Error fetching {ticker_name}: {str(e)}"
-            self.errors.append(error_msg)
-            print(f"❌ {error_msg}")
-            return None
-    
-    def fetch_all(self) -> Tuple[Optional[pd.DataFrame], list]:
+        base_wait = 5  # Start with 5 seconds
+        
+        for attempt in range(max_retries):
+            try:
+                print(f"  Attempt {attempt + 1}/{max_retries} for {ticker}")
+                
+                # Prepare download parameters
+                kwargs = {
+                    'progress': False,
+                    'interval': '1d',
+                    'timeout': 60
+                }
+                
+                # Add date range if specified
+                if self.start_date and self.end_date:
+                    kwargs['start'] = self.start_date
+                    kwargs['end'] = self.end_date
+                    print(f"  Date range: {self.start_date} to {self.end_date}")
+                else:
+                    kwargs['period'] = '1y'
+                    print(f"  Using period: 1y")
+                
+                # Download data
+                print(f"  Downloading {ticker} from Yahoo Finance...")
+                data = yf.download(ticker, **kwargs)
+                
+                # Validate and process data
+                if data is None or data.empty:
+                    print(f"  WARNING: Empty data for {ticker}")
+                    return None
+                
+                # Ensure DataFrame format with Close prices
+                if isinstance(data, pd.Series):
+                    data = data.to_frame()
+                
+                # Extract Close prices
+                if 'Close' in data.columns:
+                    close_data = data[['Close']].copy()
+                elif len(data.columns) > 0:
+                    close_data = data.iloc[:, [0]].copy()
+                else:
+                    print(f"  ERROR: No price data in {ticker}")
+                    return None
+                
+                # Ensure DateTime index
+                close_data.index = pd.to_datetime(close_data.index)
+                
+                # Remove NaN values
+                close_data = close_data.dropna()
+                
+                if close_data.empty:
+                    print(f"  WARNING: All data is NaN for {ticker}")
+                    return None
+                
+                print(f"  SUCCESS: Fetched {len(close_data)} rows for {ticker}")
+                return close_data
+                
+            except Exception as e:
+                error_str = str(e).lower()
+                
+                # Check if it's a rate limit error
+                is_rate_limit = any(keyword in error_str for keyword in 
+                                   ['rate', 'too many', 'throttle', '429', '503', 'timeout', '403'])
+                
+                if is_rate_limit and attempt < max_retries - 1:
+                    # Exponential backoff: 5s, 10s, 20s
+                    wait_time = base_wait * (2 ** attempt)
+                    print(f"  ⏳ Rate limited. Waiting {wait_time}s before retry...")
+                    st.warning(f"⏳ Rate limited. Waiting {wait_time}s before retry {attempt + 1}/{max_retries - 1}...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    print(f"  ERROR (attempt {attempt + 1}/{max_retries}): {str(e)}")
+                    if attempt == max_retries - 1:
+                        print(f"  All retries exhausted for {ticker}")
+                        raise
+        
+        return None
+
+    def get_data(self, ticker: str) -> Optional[pd.DataFrame]:
         """
-        Fetch data for all tickers and merge them
-        
-        Returns:
-            Tuple of (merged_dataframe, list_of_errors)
-        """
-        dfs = {}
-        
-        # Fetch each ticker
-        for name, symbol in self.tickers.items():
-            df = self.fetch_single_ticker(symbol, name.capitalize())
-            if df is not None:
-                dfs[name] = df
-        
-        # Check if we got all data
-        if len(dfs) == 0:
-            return None, self.errors
-        
-        # Merge on common dates
-        merged = None
-        for name, df in dfs.items():
-            if merged is None:
-                merged = df.copy()
-            else:
-                merged = pd.merge(merged, df, on='date', how='inner')
-        
-        if merged is None or merged.empty:
-            self.errors.append("Failed to merge data from all tickers")
-            return None, self.errors
-        
-        # Rename columns to proper format
-        merged.columns = ['date', 'gold', 'sp500']
-        
-        return merged, self.errors
-    
-    def validate_dates(self, df: pd.DataFrame) -> Tuple[bool, list]:
-        """
-        Validate date range and consistency
+        Get data for specific ticker
         
         Args:
-            df: DataFrame to validate
+            ticker: Ticker symbol
             
         Returns:
-            Tuple of (is_valid, list_of_issues)
+            DataFrame or None
         """
-        issues = []
-        
-        if df.empty:
-            issues.append("DataFrame is empty")
-            return False, issues
-        
-        # Check date range
-        min_date = df['date'].min()
-        max_date = df['date'].max()
-        
-        print(f"📅 Date range: {min_date.date()} to {max_date.date()}")
-        
-        # Check for future dates
-        if max_date > datetime.today():
-            issues.append(f"Future dates detected: {max_date}")
-        
-        # Check for duplicates
-        if df['date'].duplicated().any():
-            issues.append(f"Duplicate dates found: {df['date'][df['date'].duplicated()].unique()}")
-        
-        # Check date continuity (allowing for weekends/holidays)
-        date_diffs = df['date'].diff().dt.days
-        suspicious_gaps = date_diffs[date_diffs > 2]
-        if len(suspicious_gaps) > 0:
-            issues.append(f"Suspicious date gaps (> 2 days): {len(suspicious_gaps)} occurrences")
-        
-        is_valid = len(issues) == 0
-        return is_valid, issues
-    
-    def get_basic_stats(self, df: pd.DataFrame) -> Dict:
+        if self.data and ticker in self.data:
+            return self.data[ticker]
+        return None
+
+    def get_summary(self) -> Dict:
         """
-        Calculate basic statistics
+        Get summary of fetched data
         
-        Args:
-            df: DataFrame to analyze
-            
         Returns:
-            Dictionary of statistics
+            Dictionary with fetch summary
         """
-        stats = {
-            'total_rows': len(df),
-            'start_date': df['date'].min(),
-            'end_date': df['date'].max(),
-            'total_days': (df['date'].max() - df['date'].min()).days,
-            'gold_price_min': df['gold'].min(),
-            'gold_price_max': df['gold'].max(),
-            'gold_price_avg': df['gold'].mean(),
-            'sp500_price_min': df['sp500'].min(),
-            'sp500_price_max': df['sp500'].max(),
-            'sp500_price_avg': df['sp500'].mean(),
+        summary = {
+            'total_tickers_requested': len(self.tickers),
+            'tickers_fetched': len(self.data) if self.data else 0,
+            'failed_tickers': len(self.errors),
+            'tickers_list': list(self.data.keys()) if self.data else [],
+            'errors': self.errors
         }
-        return stats
+        return summary
+
+    def validate_data(self, data: pd.DataFrame) -> Tuple[bool, str]:
+        """
+        Validate fetched data quality
+        
+        Args:
+            data: Stock price data DataFrame
+        
+        Returns:
+            Tuple of (is_valid, message)
+        """
+        if data is None or data.empty:
+            return False, "Data is empty"
+        
+        # Check minimum data points (at least 50 trading days)
+        if len(data) < 50:
+            return False, f"Insufficient data: {len(data)} rows (need at least 50)"
+        
+        # Check for NaN values
+        nan_count = data.isnull().sum().sum()
+        if nan_count > 0:
+            return False, f"Data contains {nan_count} NaN values"
+        
+        # Check data has positive prices
+        if (data <= 0).any().any():
+            return False, "Data contains non-positive prices"
+        
+        return True, "Data validation passed"
