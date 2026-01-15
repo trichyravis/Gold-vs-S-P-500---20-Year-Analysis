@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from src.data_fetcher import DataFetcher
 from src.data_processor import DataProcessor
 from src.cache_manager import CacheManager
-from src.utils import DataFormatter, MetricsFormatter, ExportHelper
+from src.utils import ExportHelper
 
 # ==================== PAGE CONFIGURATION ====================
 st.set_page_config(
@@ -128,15 +128,13 @@ if fetch_button or refresh_button:
             end_date_str = end_date.strftime('%Y-%m-%d')
             
             # Fetch data
-            progress_placeholder = st.empty()
-            with progress_placeholder.container():
-                st.info(f"📥 Fetching data from Yahoo Finance...")
-                
-                fetcher = DataFetcher(tickers, start_date_str, end_date_str)
-                raw_data, fetch_errors = fetcher.fetch_all()
-                
-                st.session_state.raw_data = raw_data
-                st.session_state.fetch_errors = fetch_errors
+            st.info(f"📥 Fetching data from Yahoo Finance...")
+            
+            fetcher = DataFetcher(tickers, start_date_str, end_date_str)
+            raw_data, fetch_errors = fetcher.fetch_all()
+            
+            st.session_state.raw_data = raw_data
+            st.session_state.fetch_errors = fetch_errors
             
             if raw_data is None:
                 st.error(f"❌ Failed to fetch data. Errors: {fetch_errors}")
@@ -157,14 +155,10 @@ if fetch_button or refresh_button:
                     
                     # Show success message
                     st.success(f"✅ Data fetched and validated successfully! Quality Score: {quality_score:.1f}%")
-                    
-                    # Rerun to show data preview
                     st.rerun()
     
     except Exception as e:
         st.error(f"❌ Error during data fetch: {str(e)}")
-        import traceback
-        st.error(traceback.format_exc())
 
 # ==================== CLEAR CACHE ====================
 if clear_button:
@@ -189,7 +183,7 @@ def display_data_preview(data):
     
     st.markdown("### 📋 Data Preview")
     
-    # Get column names safely
+    # Get all columns
     all_cols = list(data.columns)
     
     # Try to find Date column (case-insensitive)
@@ -215,36 +209,39 @@ def display_data_preview(data):
         # Show latest rows
         col1, col2 = st.columns(2)
         with col1:
-            st.write("**Latest Data:**")
+            st.write("**Latest Data (Last 5 rows):**")
             latest = data[display_cols].tail(5).copy()
             st.dataframe(latest, use_container_width=True)
         
         with col2:
             st.write("**Data Statistics:**")
             stats = pd.DataFrame({
-                'Metric': ['Total Rows', 'Total Columns', 'Date Range'],
+                'Metric': ['Total Rows', 'Total Columns', 'Start Date', 'End Date'],
                 'Value': [
                     len(data),
                     len(data.columns),
-                    f"{data[date_col].min() if date_col else 'N/A'} to {data[date_col].max() if date_col else 'N/A'}"
+                    str(data[date_col].min().date()) if date_col else 'N/A',
+                    str(data[date_col].max().date()) if date_col else 'N/A'
                 ]
             })
             st.dataframe(stats, use_container_width=True)
         
         # Show download options
         st.markdown("### 💾 Export Data")
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         
         with col1:
-            csv_data = DataFormatter.format_returns(data[ticker_cols].pct_change())
-            csv_download = data[[date_col] + ticker_cols].copy() if date_col else data[ticker_cols].copy()
-            
-            st.download_button(
-                label="📥 Download CSV",
-                data=ExportHelper.dataframe_to_csv(csv_download),
-                file_name=f"gold_sp500_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv"
-            )
+            try:
+                csv_download = data[display_cols].copy()
+                csv_data = csv_download.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download CSV",
+                    data=csv_data,
+                    file_name=f"gold_sp500_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+            except Exception as e:
+                st.warning(f"CSV export error: {str(e)}")
         
         with col2:
             try:
@@ -256,9 +253,6 @@ def display_data_preview(data):
                 )
             except Exception as e:
                 st.warning(f"Excel export not available: {str(e)}")
-        
-        with col3:
-            st.info("📌 JSON export available in advanced options")
     else:
         st.warning("⚠️ No data columns available for preview")
 
@@ -281,10 +275,12 @@ def display_validation_results(validation_results):
         st.metric("Completeness", f"{summary.get('completeness', 0):.1f}%")
     
     with col3:
-        st.metric("Checks Passed", f"{summary.get('checks_passed', 0)}/{summary.get('checks_passed', 0) + summary.get('checks_failed', 0)}")
+        passed = summary.get('checks_passed', 0)
+        failed = summary.get('checks_failed', 0)
+        st.metric("Checks Passed", f"{passed}/{passed + failed}")
     
     # Show detailed results in expander
-    with st.expander("📊 Detailed Validation Results"):
+    with st.expander("📊 Detailed Validation Results", expanded=True):
         # Passed checks
         if validation_results.get('passed'):
             st.success("✅ Passed Checks:")
