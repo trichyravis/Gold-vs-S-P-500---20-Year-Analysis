@@ -1,0 +1,27 @@
+## Streamlit & Web Framework
+streamlit==1.28.1
+altair==5.0.1
+
+## Data Processing
+pandas==2.0.3
+numpy==1.24.3
+scipy==1.11.2
+
+## Financial Data & Analysis
+yfinance==0.2.28
+pandas-datareader==0.10.0
+
+## Export & File Handling
+openpyxl==3.1.2
+pyarrow==13.0.0
+xlsxwriter==3.1.5
+
+## Plotting & Visualization
+matplotlib==3.7.2
+seaborn==0.12.2
+plotly==5.16.1
+
+## Utilities
+python-dateutil==2.8.2
+pytz==2023.3
+requests==2.31.0
